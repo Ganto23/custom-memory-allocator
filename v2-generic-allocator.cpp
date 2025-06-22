@@ -5,10 +5,10 @@
 #include <chrono>
 #include <string>
 #include <new>
+#include <type_traits>
 
 // --- 1. CONFIGURATION CONSTANT ---
-// Using a power of 2 allows for ultra-fast bitwise indexing.
-const size_t TRADE_BUFFER_CAPACITY = 8192;
+const size_t TRADE_BUFFER_CAPACITY = 8192; // Must be a power of 2 for bitwise optimization
 
 // --- 2. THE TRADE STRUCTURE ---
 struct Trade {
@@ -24,7 +24,12 @@ struct Trade {
 };
 
 // --- 3. THE GENERIC POOL ALLOCATOR ---
-template <typename T, size_t N>
+struct DummyMutex {
+    void lock() {}
+    void unlock() {}
+};
+
+template <typename T, size_t N, bool ThreadSafe = true>
 class PoolAllocator {
 public:
     PoolAllocator() {
@@ -43,12 +48,11 @@ public:
         delete[] m_pool;
     }
 
-    // Deleted copy constructor and assignment operator to prevent copying.
     PoolAllocator(const PoolAllocator&) = delete;
     PoolAllocator& operator=(const PoolAllocator&) = delete;
 
     T* allocate() {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<MutexType> lock(m_mutex);
         if (!m_head_of_free_list) {
             throw std::bad_alloc();
         }
@@ -58,15 +62,17 @@ public:
     }
 
     void deallocate(T* ptr) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<MutexType> lock(m_mutex);
         *reinterpret_cast<T**>(ptr) = m_head_of_free_list;
         m_head_of_free_list = ptr;
     }
 
 private:
+    using MutexType = typename std::conditional<ThreadSafe, std::mutex, DummyMutex>::type;
+
     char* m_pool;
     T* m_head_of_free_list;
-    std::mutex m_mutex;
+    MutexType m_mutex;
 };
 
 // --- 4. THE GENERIC CIRCULAR BUFFER ---
@@ -78,7 +84,7 @@ private:
     size_t m_size;
     size_t m_head;
     mutable std::mutex m_mutex;
-    PoolAllocator<T, N> m_allocator;
+    PoolAllocator<T, N, true> m_allocator;
 
 public:
     CircularBuffer() :
@@ -97,22 +103,17 @@ public:
     void push(const T& element) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
-        // CORRECTED LOGIC: Allocation happens inside each branch.
         if (m_size < m_capacity) {
-            // If we are just filling up, we only allocate.
             T* new_element_ptr = m_allocator.allocate();
             *new_element_ptr = element;
             m_buffer[m_head] = new_element_ptr;
             m_size++;
         } else {
-            // If full, we must DEALLOCATE the old element first...
             m_allocator.deallocate(m_buffer[m_head]);
-            // ...and only THEN allocate space for the new one.
             T* new_element_ptr = m_allocator.allocate();
             *new_element_ptr = element;
             m_buffer[m_head] = new_element_ptr;
         }
-        
         m_head = (m_head + 1) & (m_capacity - 1);
     }
 
@@ -157,8 +158,9 @@ void run_benchmark() {
     const int NUM_OPS = 5'000'000;
     std::vector<Trade*> trade_pointers;
     trade_pointers.reserve(TRADE_BUFFER_CAPACITY);
+    
     std::cout << "\n--- Running Accurate Allocator Benchmark ---" << std::endl;
-    std::cout << "Performing " << NUM_OPS << " allocation/deallocation cycles." << std::endl;
+    std::cout << "Performing " << NUM_OPS << " realistic allocation cycles." << std::endl;
 
     // Test 1: Standard Allocator
     auto start1 = std::chrono::high_resolution_clock::now();
@@ -179,8 +181,8 @@ void run_benchmark() {
     std::chrono::duration<double, std::milli> standard_ms = end1 - start1;
     std::cout << "Standard new/delete Time: " << standard_ms.count() << " ms" << std::endl;
 
-    // Test 2: Custom Pool Allocator
-    PoolAllocator<Trade, TRADE_BUFFER_CAPACITY> pool;
+    // Test 2: Custom Pool Allocator (non-thread-safe version for a fair comparison)
+    PoolAllocator<Trade, TRADE_BUFFER_CAPACITY, false> pool;
     auto start2 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < NUM_OPS; ++i) {
         if (i < TRADE_BUFFER_CAPACITY) {
@@ -203,9 +205,9 @@ void run_benchmark() {
     std::cout << "------------------------------------------\n" << std::endl;
 }
 
-
 // --- 6. MAIN FUNCTION ---
 int main() {
+    // --- Integration Test ---
     std::cout << "--- Running Multi-Threaded Simulation ---" << std::endl;
     TradeBuffer sim_buffer;
     std::thread writer(writer_thread_func, std::ref(sim_buffer));
@@ -214,6 +216,7 @@ int main() {
     reader.join();
     std::cout << "Simulation completed successfully." << std::endl;
 
+    // --- Performance Test ---
     run_benchmark();
 
     return 0;
