@@ -78,5 +78,11 @@ This project solves the problem with a two-part architecture where the `Circular
 
 2.  **`CircularBuffer`:** This class acts as the high-level data structure. By owning its allocator, it becomes a fully self-contained system. This design is highly robust and flexible, allowing multiple, independent circular buffers of different types and sizes to coexist without interfering with each other. The buffer enforces a "first-in, first-out" policy by overwriting the oldest data once its capacity is reached, making it ideal for processing real-time data streams.
 
+## Future Improvements
+
+### Lock-Free Allocator
+
+In the future I will create v3, which will be adapted to be a lock-free allocator. This will remove the need to lock guards and mutexes, therefore significantly reducing overhead. The resulting performance should, in theory, be incredibly close to the single threaded version of v2.
+
 ---
 *This project was developed as a practical exploration of high-performance C++ techniques relevant to the quantitative finance industry.*
