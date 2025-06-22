@@ -64,4 +64,71 @@ int main() {
     return 0;
 }
 
- 
+
+
+template <typename T, size_t NUM_ELEMENTS>
+class CircularBuffer {
+    private:
+        std::vector<T*> m_buffer;
+        const size_t m_capacity;
+        size_t m_size;
+        size_t m_head;
+        mutable std::mutex m_mtx;
+        PoolAllocator<T, NUM_ELEMENTS> g_allocator;
+    
+    public:
+        CircularBuffer():
+            m_buffer(NUM_ELEMENTS,nullptr),
+            m_capacity(NUM_ELEMENTS),
+            m_size(0),
+            m_head(0)
+        {}
+
+        ~CircularBuffer() {
+            std::lock_guard<std::mutex> lock(m_mtx);
+            for (size_t i = 0; i < m_size; ++i) {
+                g_allocator.deallocate(m_buffer[i]);
+            }
+        }
+
+        void push(const T& element) {
+            std::lock_guard<std::mutex> lock(m_mtx);
+
+            if (m_size < m_capacity) {
+                m_buffer[m_head] = g_allocator.allocate();
+                *m_buffer[m_head] = element;
+                m_size ++;
+            } else if (m_size == m_capacity) {
+                g_allocator.deallocate(m_buffer[m_head]);
+                m_buffer[m_head] = g_allocator.allocate();
+                *m_buffer[m_head] = element;
+            }
+
+            m_head = (m_head + 1) & (m_capacity - 1);
+        }
+
+        void get_all(std::vector<T>& elements) const{
+            elements.clear();
+
+            std::lock_guard<std::mutex> lock(m_mtx);
+            elements.reserve(m_size);
+
+            size_t start_index = 0;
+            if (m_size == m_capacity) {
+                start_index = m_head;
+            }
+            for (size_t i = 0; i < m_size; ++i) {
+                size_t index = (start_index + i) & (m_capacity - 1);
+                elements.push_back(*m_buffer[index]);
+            }
+        }
+
+        size_t size() const {
+            std::lock_guard<std::mutex> lock(m_mtx);
+            return m_size;
+        }
+
+        size_t capacity() const {
+            return m_capacity;
+        }
+};
