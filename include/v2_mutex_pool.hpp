@@ -23,7 +23,7 @@ public:
             current_slot = _head;
             _head = _head->ptr;
         }
-        return new (&current_slot->data) T(std::forward<Args>(args)...);
+        return new (&current_slot->data) T{std::forward<Args>(args)...};
     }
 
     void deallocate(T* ptr) {
@@ -31,11 +31,10 @@ public:
         ptr->~T();
         Slot* new_head = reinterpret_cast<Slot*>(ptr);
         {
-            std::lock_guard<std::mutex>> lock(_mtx);
+            std::lock_guard<std::mutex> lock(_mtx);
             new_head->ptr = _head;
             _head = new_head;
         }
-
     }
 
 private:
