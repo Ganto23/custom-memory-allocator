@@ -16,19 +16,25 @@ public:
     template <typename... Args>
     T* allocate(Args&&... args) {
         TaggedPointer current = _head.load(std::memory_order_acquire);
+        int backoff = 0;
+
         while (current.index != END_OF_LIST) {
             uint32_t next_idx = _pool[current.index].next_index;
             TaggedPointer next = {next_idx, current.tag + 1};
-            
-            if (_head.compare_exchange_weak(current, next, std::memory_order_release, std::memory_order_acquire)) {
+            if (_head.compare_exchange_weak(current, next, std::memory_order_acquire, std::memory_order_acquire)) {
                 return new (&_pool[current.index].data) T{std::forward<Args>(args)...};
             }
+            for (int i = 0; i < (1 << backoff); ++i) {
+                asm volatile("yield" ::: "memory"); 
+            }
+            if (backoff < 8) backoff++;
         }
         return nullptr;
     }
 
     void deallocate(T* ptr) {
         if (!ptr) return;
+        int backoff = -1;
         
         ptr->~T();
         
@@ -40,12 +46,16 @@ public:
         do {
             released_slot->next_index = current.index;
             next = {released_index, current.tag + 1};
+            for (int i = 0; i < (1 << backoff); ++i) {
+                asm volatile("yield" ::: "memory"); 
+            }
+            if (backoff < 8) backoff++;
         } while (!_head.compare_exchange_weak(current, next, std::memory_order_release, std::memory_order_acquire));
     }
 private:
     static constexpr uint32_t END_OF_LIST = static_cast<uint32_t>(Capacity);
 
-    struct Slot {
+    struct alignas(16) Slot {
         union {
             T data;
             uint32_t next_index;
