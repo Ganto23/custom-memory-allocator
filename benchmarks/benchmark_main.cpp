@@ -6,6 +6,20 @@
 #include <vector>
 #include <array>
 #include <atomic>
+#include <pthread.h>
+#include <sched.h>
+
+// Maps Google Benchmark threads directly to your isolated cores
+inline void PinToIsolatedCore(int thread_idx) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    
+    // Thread 0 -> Core 1, Thread 1 -> Core 2, Thread 2 -> Core 3
+    int core_id = (thread_idx % 3) + 1; 
+    
+    CPU_SET(core_id, &cpuset);
+    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+}
 
 struct DummyTrade {
     int64_t order_id;
@@ -21,6 +35,7 @@ static std::atomic<bool> g_producer_done{false};
 // --- Best Case Benchmarks (Allocate & Deallocate on same thread) ---
 
 static void BM_V1_Standard_Heap(benchmark::State& state) {
+    PinToIsolatedCore(state.thread_index());
     HeapAllocator<DummyTrade> allocator;
     for (auto _ : state) {
         auto* ptr = allocator.allocate(12345, 100.50, 10, std::array<char, 8>{{'A', 'A', 'P', 'L'}});
@@ -28,9 +43,10 @@ static void BM_V1_Standard_Heap(benchmark::State& state) {
         allocator.deallocate(ptr);
     }
 }
-BENCHMARK(BM_V1_Standard_Heap)->ThreadRange(1, 8);
+BENCHMARK(BM_V1_Standard_Heap)->Threads(3);
 
 static void BM_V2_Mutex_Pool(benchmark::State& state) {
+    PinToIsolatedCore(state.thread_index());
     static PoolAllocator<DummyTrade, 1000000> pool;
     for (auto _ : state) {
         auto* ptr = pool.allocate(12345, 100.50, 10, std::array<char, 8>{{'A', 'A', 'P', 'L'}});
@@ -40,9 +56,10 @@ static void BM_V2_Mutex_Pool(benchmark::State& state) {
         }
     }
 }
-BENCHMARK(BM_V2_Mutex_Pool)->ThreadRange(1, 8);
+BENCHMARK(BM_V2_Mutex_Pool)->Threads(3);
 
 static void BM_V3_LockFree_Pool(benchmark::State& state) {
+    PinToIsolatedCore(state.thread_index());
     static LockFreePool<DummyTrade, 1000000> pool;
     for (auto _ : state) {
         auto* ptr = pool.allocate(12345, 100.50, 10, std::array<char, 8>{{'A', 'A', 'P', 'L'}});
@@ -52,9 +69,10 @@ static void BM_V3_LockFree_Pool(benchmark::State& state) {
         }
     }
 }
-BENCHMARK(BM_V3_LockFree_Pool)->ThreadRange(1, 8);
+BENCHMARK(BM_V3_LockFree_Pool)->Threads(3);
 
 static void BM_V4_Thread_Local_Pool(benchmark::State& state) {
+    PinToIsolatedCore(state.thread_index());
     static ThreadLocalPool<DummyTrade, 1000000> pool;
     for (auto _ : state) {
         auto* ptr = pool.allocate(12345, 100.50, 10, std::array<char, 8>{{'A', 'A', 'P', 'L'}});
@@ -64,12 +82,13 @@ static void BM_V4_Thread_Local_Pool(benchmark::State& state) {
         }
     }
 }
-BENCHMARK(BM_V4_Thread_Local_Pool)->ThreadRange(1, 8);
+BENCHMARK(BM_V4_Thread_Local_Pool)->Threads(3);
 
 // --- Difficult Benchmarks (Producer/Consumer Cross-Thread) ---
 
 template <typename Allocator>
 void ProducerConsumerTest(benchmark::State& state, Allocator& pool) {
+    PinToIsolatedCore(state.thread_index());
     if (state.thread_index() == 0) {
         g_transfer_slot.store(nullptr, std::memory_order_release);
     }
