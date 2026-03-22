@@ -1,7 +1,12 @@
+#pragma once
 #include <atomic>
 #include <cstdint>
 #include <utility>
 #include <sys/mman.h>
+#include <cstdlib>
+#include <cstdio>
+
+namespace hft::memory {
 
 template <typename T, size_t Capacity = 1024>
 class ThreadLocalPool {
@@ -10,15 +15,15 @@ public:
         
         size_t size = sizeof(Slot) * Capacity;
 
-        // Request memory from the kernel with the HUGEPAGE flag
         _pool = (Slot*)mmap(nullptr, size, PROT_READ | PROT_WRITE, 
                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
 
         if (_pool == MAP_FAILED) {
-            // Fallback or throw error if Huge Pages aren't available
             _pool = (Slot*)aligned_alloc(256, size); 
+            _used_mmap = false;
+        } else {
+            _used_mmap = true;
         }
-        
 
         for (size_t i = 0; i < Capacity - 1; ++i) {
             _pool[i].next_index = static_cast<uint32_t>(i + 1);
@@ -27,13 +32,27 @@ public:
         _head.store({0, 0}, std::memory_order_release);
     }
 
+    ~ThreadLocalPool() {
+        if (!_pool) return;
+        
+        size_t size = sizeof(Slot) * Capacity;
+        
+        if (_used_mmap) {
+            munmap(_pool, size);
+        } else {
+            free(_pool);
+        }
+        
+        _pool = nullptr;
+    }
+
     template <typename... Args>
     T* allocate(Args&&... args) {
         if (local_cache.count == 0) [[unlikely]] {
             TaggedPointer current = _head.load(std::memory_order_acquire);
             int backoff = 0;
 
-            while (current.index != END_OF_LIST) {
+            while (current.index != END_OF_LIST) [[likely]] {
                 uint32_t first = current.index;
                 uint32_t last = first;
                 size_t grabbed = 1;
@@ -61,7 +80,8 @@ public:
                 }
                 if (backoff < 8) {backoff++;}
             }
-            return nullptr;
+            std::fprintf(stderr, "FATAL: HFTAllocator Pool Exhausted. Halting.\n");
+            std::abort();
         }
 
         return new (&_pool[local_cache.indices[--local_cache.count]].data) T{std::forward<Args>(args)...};
@@ -126,8 +146,8 @@ private:
         size_t count = 0;
     };
 
-    //alignas(256) Slot _pool[Capacity];
     alignas(64) Slot* _pool;
+    bool _used_mmap;
     alignas(256) std::atomic<TaggedPointer> _head;
     static thread_local Magazine local_cache;
 };
@@ -135,3 +155,4 @@ private:
 
 template <typename T, size_t Capacity>
 thread_local typename ThreadLocalPool<T, Capacity>::Magazine ThreadLocalPool<T, Capacity>::local_cache;
+}

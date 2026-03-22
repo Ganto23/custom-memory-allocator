@@ -3,11 +3,15 @@
 #include "v2_mutex_pool.hpp"
 #include "v3_lockfree_pool.hpp"
 #include "v4_thread_local_pool.hpp"
+#include "hft_allocator.hpp"
 #include <vector>
 #include <array>
 #include <atomic>
 #include <pthread.h>
 #include <sched.h>
+#include <list>
+
+using namespace hft::memory;
 
 // Maps Google Benchmark threads directly to your isolated cores
 inline void PinToIsolatedCore(int thread_idx) {
@@ -119,13 +123,6 @@ void ProducerConsumerTest(benchmark::State& state, Allocator& pool) {
     }
 }
 
-// V1 - Likely still prone to glibc aborts due to cross-thread free()
-static void BM_V1_PC(benchmark::State& state) {
-    static HeapAllocator<DummyTrade> pool;
-    ProducerConsumerTest(state, pool);
-}
-//BENCHMARK(BM_V1_PC)->Threads(2);
-
 static void BM_V2_PC(benchmark::State& state) {
     static PoolAllocator<DummyTrade, 1000000> pool;
     ProducerConsumerTest(state, pool);
@@ -143,5 +140,40 @@ static void BM_V4_PC(benchmark::State& state) {
     ProducerConsumerTest(state, pool);
 }
 BENCHMARK(BM_V4_PC)->Threads(2);
+
+// --- STL Integration Benchmarks ---
+
+static void BM_StandardList(benchmark::State& state) {
+    PinToIsolatedCore(state.thread_index());
+    
+    std::list<DummyTrade> standard_list;
+    // Prime the list with one item so pop_front() is safe
+    standard_list.push_back({12345, 100.50, 10, {'A', 'A', 'P', 'L'}});
+    
+    for (auto _ : state) {
+        // Allocate a new node at the back
+        standard_list.push_back({12345, 100.50, 10, {'A', 'A', 'P', 'L'}});
+        // Deallocate the old node from the front
+        standard_list.pop_front();
+    }
+}
+BENCHMARK(BM_StandardList)->Threads(1);
+
+
+static void BM_HFTList(benchmark::State& state) {
+    PinToIsolatedCore(state.thread_index());
+    
+    std::list<DummyTrade, HFTAllocator<DummyTrade>> hft_list;
+    // Prime the list
+    hft_list.push_back({12345, 100.50, 10, {'A', 'A', 'P', 'L'}});
+    
+    for (auto _ : state) {
+        // Allocate via ThreadLocalPool
+        hft_list.push_back({12345, 100.50, 10, {'A', 'A', 'P', 'L'}});
+        // Deallocate via ThreadLocalPool
+        hft_list.pop_front();
+    }
+}
+BENCHMARK(BM_HFTList)->Threads(1);
 
 BENCHMARK_MAIN();
